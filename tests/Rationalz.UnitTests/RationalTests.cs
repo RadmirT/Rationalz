@@ -13,6 +13,25 @@ public class RationalTests
         Assert.Equal(-3, rational.Numerator);
         Assert.Equal(4, rational.Denominator);
     }
+    
+    [Theory]
+    [InlineData(0.1234,617, 5000)]
+    [InlineData(0.2777777777777778,5, 18)]
+    [InlineData(0.5144444444444445,463, 900)]
+    [InlineData(0.5144444444444444,463, 900)]
+
+    public void CreateChecked_DoubleValue_ReturnsExpectedValue(double value, int expectedNumerator, int expectedDenominator)
+    {
+        Rational<int> rational = CreateCheckedFunc<Rational<int>>(value);
+
+        Assert.Equal(new Rational<int>(expectedNumerator, expectedDenominator), rational);
+        
+        T CreateCheckedFunc<T>(double value)
+            where T : INumber<T>
+        {
+            return T.CreateChecked(value);
+        }
+    }
 
     [Fact]
     public void Constructor_ZeroNumerator_NormalizesToZeroOverOne()
@@ -253,8 +272,8 @@ public class RationalTests
     {
         bool converted = Rational<int>.TryConvertFromChecked(0.0254d, out Rational<int> result);
 
-        Assert.False(converted);
-        Assert.Equal(Rational<int>.Zero, result);
+        Assert.True(converted);
+        Assert.Equal(new Rational<int>(127, 5000), result);
     }
 
     [Fact]

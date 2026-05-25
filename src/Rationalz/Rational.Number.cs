@@ -284,7 +284,7 @@ public readonly partial struct Rational<T> : INumber<Rational<T>>
             return true;
         }
 
-        if (TryConvertFromFloatingPoint(value, static x => T.CreateChecked(x), out result))
+        if (TryConvertFromFloatingPoint(value, IntegerConversion.Checked, out result))
         {
             return true;
         }
@@ -305,6 +305,20 @@ public readonly partial struct Rational<T> : INumber<Rational<T>>
     }
 
     /// <summary>
+    /// Creates a rational number from another numeric value with overflow checking.
+    /// </summary>
+    public static Rational<T> CreateChecked<TOther>(TOther value)
+        where TOther : INumberBase<TOther>
+    {
+        if (TryConvertFromChecked(value, out Rational<T> result))
+        {
+            return result;
+        }
+
+        throw new OverflowException($"Value of type {typeof(TOther)} cannot be represented as {typeof(Rational<T>)}.");
+    }
+
+    /// <summary>
     /// Пытается преобразовать другое числовое значение в дробь с насыщением.
     /// </summary>
     public static bool TryConvertFromSaturating<TOther>(TOther value, out Rational<T> result)
@@ -316,7 +330,7 @@ public readonly partial struct Rational<T> : INumber<Rational<T>>
             return true;
         }
 
-        if (TryConvertFromFloatingPoint(value, static x => T.CreateSaturating(x), out result))
+        if (TryConvertFromFloatingPoint(value, IntegerConversion.Saturating, out result))
         {
             return true;
         }
@@ -343,7 +357,7 @@ public readonly partial struct Rational<T> : INumber<Rational<T>>
             return true;
         }
 
-        if (TryConvertFromFloatingPoint(value, static x => T.CreateTruncating(x), out result))
+        if (TryConvertFromFloatingPoint(value, IntegerConversion.Truncating, out result))
         {
             return true;
         }
@@ -492,7 +506,7 @@ public readonly partial struct Rational<T> : INumber<Rational<T>>
     /// </summary>
     public static Rational<T> Zero { get; } = new(T.Zero, T.One);
 
-    private static bool TryConvertFromFloatingPoint<TOther>(TOther value, Func<BigInteger, T> convert, out Rational<T> result)
+    private static bool TryConvertFromFloatingPoint<TOther>(TOther value, IntegerConversion conversion, out Rational<T> result)
         where TOther : INumberBase<TOther>
     {
         if (!TOther.IsRealNumber(value) || !TryGetComponents(value, out BigInteger significand, out BigInteger exponentBase, out int exponent))
@@ -501,20 +515,20 @@ public readonly partial struct Rational<T> : INumber<Rational<T>>
             return false;
         }
 
+        BigInteger numerator = significand;
+        BigInteger denominator = BigInteger.One;
+
+        if (exponent > 0)
+        {
+            numerator *= BigInteger.Pow(exponentBase, exponent);
+        }
+        else if (exponent < 0)
+        {
+            denominator = BigInteger.Pow(exponentBase, -exponent);
+        }
+
         try
         {
-            BigInteger numerator = significand;
-            BigInteger denominator = BigInteger.One;
-
-            if (exponent > 0)
-            {
-                numerator *= BigInteger.Pow(exponentBase, exponent);
-            }
-            else if (exponent < 0)
-            {
-                denominator = BigInteger.Pow(exponentBase, -exponent);
-            }
-
             BigInteger gcd = BigInteger.GreatestCommonDivisor(BigInteger.Abs(numerator), denominator);
             if (gcd > BigInteger.One)
             {
@@ -522,14 +536,98 @@ public readonly partial struct Rational<T> : INumber<Rational<T>>
                 denominator /= gcd;
             }
 
-            result = new Rational<T>(convert(numerator), convert(denominator));
+            T convertedNumerator = ConvertInteger(numerator, conversion);
+            T convertedDenominator = T.CreateChecked(denominator);
+
+            result = new Rational<T>(convertedNumerator, convertedDenominator);
             return true;
         }
         catch
         {
+            if (conversion == IntegerConversion.Checked &&
+                exponentBase == 10 &&
+                exponent < 0 &&
+                IsBinaryFloatingPoint(value) &&
+                TryApproximate(numerator, denominator, -exponent, out result))
+            {
+                return true;
+            }
+
             result = default;
             return false;
         }
+    }
+
+    private static bool TryApproximate(BigInteger numerator, BigInteger denominator, int decimalPlaces, out Rational<T> result)
+    {
+        BigInteger toleranceDenominator = BigInteger.Pow(10, decimalPlaces);
+        BigInteger n0 = BigInteger.Zero;
+        BigInteger d0 = BigInteger.One;
+        BigInteger n1 = BigInteger.One;
+        BigInteger d1 = BigInteger.Zero;
+        BigInteger remainingNumerator = numerator;
+        BigInteger remainingDenominator = denominator;
+
+        while (remainingDenominator != BigInteger.Zero)
+        {
+            BigInteger quotient = BigInteger.DivRem(remainingNumerator, remainingDenominator, out BigInteger remainder);
+            BigInteger nextNumerator = quotient * n1 + n0;
+            BigInteger nextDenominator = quotient * d1 + d0;
+
+            if (!CanRepresent(nextNumerator) || !CanRepresent(nextDenominator))
+            {
+                break;
+            }
+
+            BigInteger differenceNumerator = BigInteger.Abs(numerator * nextDenominator - nextNumerator * denominator);
+            BigInteger differenceDenominator = denominator * nextDenominator;
+
+            if (differenceNumerator * toleranceDenominator <= differenceDenominator)
+            {
+                result = new Rational<T>(T.CreateChecked(nextNumerator), T.CreateChecked(nextDenominator));
+                return true;
+            }
+
+            n0 = n1;
+            d0 = d1;
+            n1 = nextNumerator;
+            d1 = nextDenominator;
+            remainingNumerator = remainingDenominator;
+            remainingDenominator = remainder;
+        }
+
+        result = default;
+        return false;
+    }
+
+    private static bool CanRepresent(BigInteger value)
+    {
+        try
+        {
+            T.CreateChecked(value);
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static bool IsBinaryFloatingPoint<TOther>(TOther value)
+        where TOther : INumberBase<TOther>
+    {
+        return value is double or float or Half;
+    }
+
+    private static T ConvertInteger(BigInteger value, IntegerConversion conversion)
+    {
+        return conversion switch
+        {
+            IntegerConversion.Checked => T.CreateChecked(value),
+            IntegerConversion.Saturating => T.CreateSaturating(value),
+            IntegerConversion.Truncating => T.CreateTruncating(value),
+            _ => throw new ArgumentOutOfRangeException(nameof(conversion), conversion, null)
+        };
     }
 
     private static bool TryGetComponents<TOther>(TOther value, out BigInteger significand, out BigInteger exponentBase, out int exponent)
@@ -557,16 +655,31 @@ public readonly partial struct Rational<T> : INumber<Rational<T>>
 
         if (value is double doubleValue)
         {
+            if (TryGetDecimalFloatingComponents(doubleValue, out significand, out exponentBase, out exponent))
+            {
+                return true;
+            }
+
             return TryGetBinaryFloatingComponents(doubleValue, 11, 52, 1023, out significand, out exponentBase, out exponent);
         }
 
         if (value is float floatValue)
         {
+            if (TryGetDecimalFloatingComponents(floatValue, out significand, out exponentBase, out exponent))
+            {
+                return true;
+            }
+
             return TryGetBinaryFloatingComponents(floatValue, 8, 23, 127, out significand, out exponentBase, out exponent);
         }
 
         if (value is Half halfValue)
         {
+            if (TryGetDecimalFloatingComponents(halfValue, out significand, out exponentBase, out exponent))
+            {
+                return true;
+            }
+
             return TryGetBinaryFloatingComponents(halfValue, 5, 10, 15, out significand, out exponentBase, out exponent);
         }
 
@@ -574,6 +687,69 @@ public readonly partial struct Rational<T> : INumber<Rational<T>>
         exponentBase = default;
         exponent = default;
         return false;
+    }
+
+    private static bool TryGetDecimalFloatingComponents<TFloat>(
+        TFloat value,
+        out BigInteger significand,
+        out BigInteger exponentBase,
+        out int exponent)
+        where TFloat : unmanaged
+    {
+        string? text = value switch
+        {
+            double doubleValue when double.IsFinite(doubleValue) => doubleValue.ToString(null, CultureInfo.InvariantCulture),
+            float floatValue when float.IsFinite(floatValue) => floatValue.ToString(null, CultureInfo.InvariantCulture),
+            Half halfValue when Half.IsFinite(halfValue) => halfValue.ToString(null, CultureInfo.InvariantCulture),
+            _ => null
+        };
+
+        if (text is null)
+        {
+            significand = default;
+            exponentBase = default;
+            exponent = default;
+            return false;
+        }
+
+        int scientificExponent = 0;
+        int exponentIndex = text.IndexOfAny("eE".ToCharArray());
+        if (exponentIndex >= 0)
+        {
+            if (!int.TryParse(text.AsSpan(exponentIndex + 1), NumberStyles.Integer, CultureInfo.InvariantCulture, out scientificExponent))
+            {
+                significand = default;
+                exponentBase = default;
+                exponent = default;
+                return false;
+            }
+
+            text = text[..exponentIndex];
+        }
+
+        bool isNegative = text.StartsWith("-", StringComparison.Ordinal);
+        if (isNegative || text.StartsWith("+", StringComparison.Ordinal))
+        {
+            text = text[1..];
+        }
+
+        int decimalPointIndex = text.IndexOf('.');
+        int fractionalDigits = decimalPointIndex >= 0 ? text.Length - decimalPointIndex - 1 : 0;
+        string digits = decimalPointIndex >= 0 ? text.Remove(decimalPointIndex, 1) : text;
+
+        digits = digits.TrimStart('0');
+        significand = digits.Length == 0
+            ? BigInteger.Zero
+            : BigInteger.Parse(digits, NumberStyles.None, CultureInfo.InvariantCulture);
+
+        if (isNegative)
+        {
+            significand = -significand;
+        }
+
+        exponentBase = 10;
+        exponent = scientificExponent - fractionalDigits;
+        return true;
     }
 
     private static bool TryGetBinaryFloatingComponents<TFloat>(
@@ -642,5 +818,12 @@ public readonly partial struct Rational<T> : INumber<Rational<T>>
             Half halfValue => halfValue == (Half)0,
             _ => false
         };
+    }
+
+    private enum IntegerConversion
+    {
+        Checked,
+        Saturating,
+        Truncating
     }
 }
