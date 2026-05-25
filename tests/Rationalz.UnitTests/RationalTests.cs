@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Numerics;
 
 namespace Rationalz.UnitTests;
 
@@ -230,6 +231,33 @@ public class RationalTests
     }
 
     [Fact]
+    public void TryConvertFromChecked_DecimalValue_ReturnsExactRational()
+    {
+        bool converted = Rational<int>.TryConvertFromChecked(12.5m, out Rational<int> result);
+
+        Assert.True(converted);
+        Assert.Equal(new Rational<int>(25, 2), result);
+    }
+
+    [Fact]
+    public void TryConvertFromChecked_DoubleValue_ReturnsExactBinaryRational()
+    {
+        bool converted = Rational<int>.TryConvertFromChecked(0.125d, out Rational<int> result);
+
+        Assert.True(converted);
+        Assert.Equal(new Rational<int>(1, 8), result);
+    }
+
+    [Fact]
+    public void TryConvertFromChecked_NonIntegerDouble_DoesNotFallbackToIntegerTruncation()
+    {
+        bool converted = Rational<int>.TryConvertFromChecked(0.0254d, out Rational<int> result);
+
+        Assert.False(converted);
+        Assert.Equal(Rational<int>.Zero, result);
+    }
+
+    [Fact]
     public void TryConvertToChecked_IntegerRational_ReturnsTargetValue()
     {
         bool converted = Rational<int>.TryConvertToChecked(new Rational<int>(42, 1), out int result);
@@ -264,6 +292,13 @@ public class RationalTests
         Rational<int> rational = 42;
 
         Assert.Equal(new Rational<int>(42, 1), rational);
+    }
+
+    [Fact]
+    public void Test()
+    {
+        Rational<long>.TryConvertFromChecked(100, out Rational<long> rational);
+        Assert.Equal(100, (decimal)rational);
     }
 
     [Fact]
