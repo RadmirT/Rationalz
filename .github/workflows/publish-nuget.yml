@@ -4,13 +4,6 @@ on:
   push:
     tags:
       - "v*"
-  workflow_dispatch:
-    inputs:
-      dry_run:
-        description: "Run build/test/pack without publishing to NuGet"
-        required: false
-        default: true
-        type: boolean
 
 permissions:
   contents: read
@@ -21,17 +14,43 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
       - name: Setup .NET
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@v5
         with:
           dotnet-version: |
             10.0.x
 
       - name: Resolve package version from tag
-        if: startsWith(github.ref, 'refs/tags/v')
         run: echo "PACKAGE_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+
+      - name: Validate release tag format
+        shell: bash
+        run: |
+          if [[ ! "${GITHUB_REF_NAME}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9]+(\.[A-Za-z0-9]+)*)?$ ]]; then
+            echo "Invalid release tag: ${GITHUB_REF_NAME}"
+            echo "Expected format:"
+            echo "  v1.2.3"
+            echo "  v1.2.3-beta.1"
+            exit 1
+          fi
+
+      - name: Check that tag belongs to master
+        shell: bash
+        run: |
+          git fetch origin master --depth=100
+
+          TAG_COMMIT=$(git rev-list -n 1 "${GITHUB_REF_NAME}")
+
+          if ! git merge-base --is-ancestor "$TAG_COMMIT" origin/master; then
+            echo "Tag ${GITHUB_REF_NAME} is not on master"
+            exit 1
+          fi
+
+          echo "Tag ${GITHUB_REF_NAME} is on master"
 
       - name: Restore
         run: dotnet restore Rationalz.sln
@@ -42,14 +61,15 @@ jobs:
       - name: Test
         run: dotnet test tests/Rationalz.UnitTests/Rationalz.UnitTests.csproj --configuration Release --no-build
 
-      - name: Pack (tag version)
-        if: env.PACKAGE_VERSION != ''
+      - name: Pack
         run: dotnet pack src/Rationalz/Rationalz.csproj --configuration Release --no-build --output ./artifacts /p:PackageVersion=${{ env.PACKAGE_VERSION }}
 
-      - name: Pack (csproj version)
-        if: env.PACKAGE_VERSION == ''
-        run: dotnet pack src/Rationalz/Rationalz.csproj --configuration Release --no-build --output ./artifacts
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: rationalz-nuget-${{ env.PACKAGE_VERSION }}
+          path: ./artifacts/*.nupkg
+          if-no-files-found: error
 
       - name: Publish to NuGet
-        if: github.event_name == 'push' || github.event.inputs.dry_run == 'false'
-        run: dotnet nuget push "./artifacts/*.nupkg" --api-key "${{ secrets.NUGET_API_KEY }}" --source https://api.nuget.org/v3/index.json
+        run: dotnet nuget push "./artifacts/*.nupkg" --api-key "${{ secrets.NUGET_API_KEY }}" --source https://api.nuget.org/v3/index.json --skip-duplicate
