@@ -284,13 +284,23 @@ public readonly partial struct Rational<T> : INumber<Rational<T>>
             return true;
         }
 
-        if (TOther.TryConvertToChecked(value, out T converted))
+        if (TryConvertFromFloatingPoint(value, static x => T.CreateChecked(x), out result))
+        {
+            return true;
+        }
+
+        if (TOther.IsInteger(value) && T.TryConvertFromChecked(value, out var integer))
+        {
+            result = new Rational<T>(integer, T.One);
+            return true;
+        }
+        if (TOther.IsInteger(value) && TOther.TryConvertToChecked(value, out T converted))
         {
             result = new Rational<T>(converted, T.One);
             return true;
         }
 
-        result = default;
+        result = Zero;
         return false;
     }
 
@@ -303,6 +313,11 @@ public readonly partial struct Rational<T> : INumber<Rational<T>>
         if (typeof(TOther) == typeof(T))
         {
             result = new Rational<T>((T)(object)value, T.One);
+            return true;
+        }
+
+        if (TryConvertFromFloatingPoint(value, static x => T.CreateSaturating(x), out result))
+        {
             return true;
         }
 
@@ -325,6 +340,11 @@ public readonly partial struct Rational<T> : INumber<Rational<T>>
         if (typeof(TOther) == typeof(T))
         {
             result = new Rational<T>((T)(object)value, T.One);
+            return true;
+        }
+
+        if (TryConvertFromFloatingPoint(value, static x => T.CreateTruncating(x), out result))
+        {
             return true;
         }
 
@@ -471,4 +491,156 @@ public readonly partial struct Rational<T> : INumber<Rational<T>>
     /// Возвращает ноль.
     /// </summary>
     public static Rational<T> Zero { get; } = new(T.Zero, T.One);
+
+    private static bool TryConvertFromFloatingPoint<TOther>(TOther value, Func<BigInteger, T> convert, out Rational<T> result)
+        where TOther : INumberBase<TOther>
+    {
+        if (!TOther.IsRealNumber(value) || !TryGetComponents(value, out BigInteger significand, out BigInteger exponentBase, out int exponent))
+        {
+            result = default;
+            return false;
+        }
+
+        try
+        {
+            BigInteger numerator = significand;
+            BigInteger denominator = BigInteger.One;
+
+            if (exponent > 0)
+            {
+                numerator *= BigInteger.Pow(exponentBase, exponent);
+            }
+            else if (exponent < 0)
+            {
+                denominator = BigInteger.Pow(exponentBase, -exponent);
+            }
+
+            BigInteger gcd = BigInteger.GreatestCommonDivisor(BigInteger.Abs(numerator), denominator);
+            if (gcd > BigInteger.One)
+            {
+                numerator /= gcd;
+                denominator /= gcd;
+            }
+
+            result = new Rational<T>(convert(numerator), convert(denominator));
+            return true;
+        }
+        catch
+        {
+            result = default;
+            return false;
+        }
+    }
+
+    private static bool TryGetComponents<TOther>(TOther value, out BigInteger significand, out BigInteger exponentBase, out int exponent)
+        where TOther : INumberBase<TOther>
+    {
+        if (value is decimal decimalValue)
+        {
+            int[] bits = decimal.GetBits(decimalValue);
+            uint lo = (uint)bits[0];
+            uint mid = (uint)bits[1];
+            uint hi = (uint)bits[2];
+            bool isNegative = (bits[3] & unchecked((int)0x80000000)) != 0;
+            int scale = (bits[3] >> 16) & 0xFF;
+
+            significand = ((BigInteger)hi << 64) | ((BigInteger)mid << 32) | lo;
+            if (isNegative)
+            {
+                significand = -significand;
+            }
+
+            exponentBase = 10;
+            exponent = -scale;
+            return true;
+        }
+
+        if (value is double doubleValue)
+        {
+            return TryGetBinaryFloatingComponents(doubleValue, 11, 52, 1023, out significand, out exponentBase, out exponent);
+        }
+
+        if (value is float floatValue)
+        {
+            return TryGetBinaryFloatingComponents(floatValue, 8, 23, 127, out significand, out exponentBase, out exponent);
+        }
+
+        if (value is Half halfValue)
+        {
+            return TryGetBinaryFloatingComponents(halfValue, 5, 10, 15, out significand, out exponentBase, out exponent);
+        }
+
+        significand = default;
+        exponentBase = default;
+        exponent = default;
+        return false;
+    }
+
+    private static bool TryGetBinaryFloatingComponents<TFloat>(
+        TFloat value,
+        int exponentBitCount,
+        int significandBitCount,
+        int exponentBias,
+        out BigInteger significand,
+        out BigInteger exponentBase,
+        out int exponent)
+        where TFloat : unmanaged
+    {
+        ulong bits = value switch
+        {
+            double doubleValue when !double.IsFinite(doubleValue) => 0,
+            double doubleValue => (ulong)BitConverter.DoubleToInt64Bits(doubleValue),
+            float floatValue when !float.IsFinite(floatValue) => 0,
+            float floatValue => BitConverter.SingleToUInt32Bits(floatValue),
+            Half halfValue when !Half.IsFinite(halfValue) => 0,
+            Half halfValue => BitConverter.HalfToUInt16Bits(halfValue),
+            _ => 0
+        };
+
+        if (bits == 0 && !IsZero(value))
+        {
+            significand = default;
+            exponentBase = default;
+            exponent = default;
+            return false;
+        }
+
+        int signShift = significandBitCount + exponentBitCount;
+        ulong exponentMask = (1UL << exponentBitCount) - 1;
+        ulong significandMask = (1UL << significandBitCount) - 1;
+        bool isNegative = ((bits >> signShift) & 1UL) != 0;
+        int rawExponent = (int)((bits >> significandBitCount) & exponentMask);
+        ulong rawSignificand = bits & significandMask;
+
+        if (rawExponent == 0)
+        {
+            significand = rawSignificand;
+            exponent = 1 - exponentBias - significandBitCount;
+        }
+        else
+        {
+            significand = (BigInteger.One << significandBitCount) | rawSignificand;
+            exponent = rawExponent - exponentBias - significandBitCount;
+        }
+
+        if (isNegative)
+        {
+            significand = -significand;
+        }
+
+        exponentBase = 2;
+        return true;
+    }
+
+    private static bool IsZero<TFloat>(TFloat value)
+        where TFloat : unmanaged
+    {
+        return value switch
+        {
+            double doubleValue => doubleValue == 0d,
+            float floatValue => floatValue == 0f,
+            Half halfValue => halfValue == (Half)0,
+            _ => false
+        };
+    }
 }
