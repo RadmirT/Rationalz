@@ -5,6 +5,12 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Run build/test/pack without publishing to NuGet"
+        required: false
+        default: true
+        type: boolean
 
 permissions:
   contents: read
@@ -23,6 +29,10 @@ jobs:
           dotnet-version: |
             10.0.x
 
+      - name: Resolve package version from tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: echo "PACKAGE_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+
       - name: Restore
         run: dotnet restore Rationalz.sln
 
@@ -32,8 +42,14 @@ jobs:
       - name: Test
         run: dotnet test tests/Rationalz.UnitTests/Rationalz.UnitTests.csproj --configuration Release --no-build
 
-      - name: Pack
+      - name: Pack (tag version)
+        if: env.PACKAGE_VERSION != ''
+        run: dotnet pack src/Rationalz/Rationalz.csproj --configuration Release --no-build --output ./artifacts /p:PackageVersion=${{ env.PACKAGE_VERSION }}
+
+      - name: Pack (csproj version)
+        if: env.PACKAGE_VERSION == ''
         run: dotnet pack src/Rationalz/Rationalz.csproj --configuration Release --no-build --output ./artifacts
 
       - name: Publish to NuGet
-        run: dotnet nuget push "./artifacts/*.nupkg" --api-key "${{ secrets.NUGET_API_KEY }}" --source https://api.nuget.org/v3/index.json --skip-duplicate
+        if: github.event_name == 'push' || github.event.inputs.dry_run == 'false'
+        run: dotnet nuget push "./artifacts/*.nupkg" --api-key "${{ secrets.NUGET_API_KEY }}" --source https://api.nuget.org/v3/index.json
